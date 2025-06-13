@@ -1,0 +1,1450 @@
+Path: Factory.sol
+Content:
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.20;
+
+import {Owned} from "./lib/solmate/Owned.sol";
+import {FixedPointMathLib} from "./lib/solmate/FixedPointMathLib.sol";
+import {IUniswapV2Factory} from "./lib/v2-core/interfaces/IUniswapV2Factory.sol";
+import {IUniswapV2Pair} from "./lib/v2-core/interfaces/IUniswapV2Pair.sol";
+import {GREY} from "./lib/GREY.sol";
+import {Token} from "./Token.sol";
+
+contract Factory is Owned {
+    using FixedPointMathLib for uint256;
+
+    error MinimumLiquidityTooSmall();
+    error TargetGREYRaisedTooLarge();
+    error TargetGREYRaisedReached();
+    error TargetGREYRaisedNotReached();
+    error InsufficientAmountIn();
+    error InsufficientAmountOut();
+    error InsufficientLiquidity();
+    error InsufficientGREYLiquidity();
+    error InvalidToken();
+
+    event TokenCreated(address indexed token, address indexed creator);
+    event TokenBought(address indexed user, address indexed token, uint256 indexed ethAmount, uint256 tokenAmount);
+    event TokenSold(address indexed user, address indexed token, uint256 indexed ethAmount, uint256 tokenAmount);
+    event TokenLaunched(address indexed token, address indexed uniswapV2Pair);
+
+    struct Pair {
+        uint256 virtualLiquidity;
+        uint256 reserveGREY;
+        uint256 reserveToken;
+    }
+
+    uint256 public constant MINIMUM_VIRTUAL_LIQUIDITY = 0.01 ether;
+
+    GREY public immutable grey;
+
+    IUniswapV2Factory public immutable uniswapV2Factory;
+
+    // Amount of "fake" GREY liquidity each pair starts with
+    uint256 public virtualLiquidity;
+
+    // Amount of GREY to be raised for bonding to end
+    uint256 public targetGREYRaised;
+
+    // Reserves and additional info for each token
+    mapping(address => Pair) public pairs;
+
+    // ======================================== CONSTRUCTOR ========================================
+
+    constructor(address _grey, address _uniswapV2Factory, uint256 _virtualLiquidity, uint256 _targetGREYRaised)
+        Owned(msg.sender)
+    {
+        if (_virtualLiquidity < MINIMUM_VIRTUAL_LIQUIDITY) {
+            revert MinimumLiquidityTooSmall();
+        }
+
+        grey = GREY(_grey);
+        uniswapV2Factory = IUniswapV2Factory(_uniswapV2Factory);
+
+        virtualLiquidity = _virtualLiquidity;
+        targetGREYRaised = _targetGREYRaised;
+    }
+
+    // ======================================== ADMIN FUNCTIONS ========================================
+
+    function setVirtualLiquidity(uint256 _virtualLiquidity) external onlyOwner {
+        if (_virtualLiquidity < MINIMUM_VIRTUAL_LIQUIDITY) {
+            revert MinimumLiquidityTooSmall();
+        }
+
+        virtualLiquidity = _virtualLiquidity;
+    }
+
+    function setTargetGREYRaised(uint256 _targetGREYRaised) external onlyOwner {
+        targetGREYRaised = _targetGREYRaised;
+    }
+
+    // ======================================== USER FUNCTIONS ========================================
+
+    function createToken(string memory name, string memory symbol, bytes32 salt, uint256 amountIn)
+        external
+        returns (address tokenAddress, uint256 amountOut)
+    {
+        Token token = new Token{salt: salt}(name, symbol);
+        tokenAddress = address(token);
+
+        pairs[tokenAddress] = Pair({
+            virtualLiquidity: virtualLiquidity,
+            reserveGREY: virtualLiquidity,
+            reserveToken: token.INITIAL_AMOUNT()
+        });
+
+        // minAmountOut not needed here as token was just created
+        if (amountIn != 0) amountOut = _buyTokens(tokenAddress, amountIn, 0);
+
+        emit TokenCreated(tokenAddress, msg.sender);
+    }
+
+    function buyTokens(address token, uint256 amountIn, uint256 minAmountOut) external returns (uint256 amountOut) {
+        Pair memory pair = pairs[token];
+        if (pair.virtualLiquidity == 0) revert InvalidToken();
+
+        uint256 actualLiquidity = pair.reserveGREY - pair.virtualLiquidity;
+        if (actualLiquidity >= targetGREYRaised) {
+            revert TargetGREYRaisedReached();
+        }
+
+        amountOut = _buyTokens(token, amountIn, minAmountOut);
+    }
+
+    function sellTokens(address token, uint256 amountIn, uint256 minAmountOut) external returns (uint256 amountOut) {
+        Pair storage pair = pairs[token];
+        if (pair.virtualLiquidity == 0) revert InvalidToken();
+
+        uint256 actualLiquidity = pair.reserveGREY - pair.virtualLiquidity;
+        if (actualLiquidity >= targetGREYRaised) {
+            revert TargetGREYRaisedReached();
+        }
+
+        amountOut = _getAmountOut(amountIn, pair.reserveToken, pair.reserveGREY);
+
+        // In theory, this check should never fail
+        if (amountOut > actualLiquidity) revert InsufficientGREYLiquidity();
+
+        pair.reserveToken += amountIn;
+        pair.reserveGREY -= amountOut;
+
+        if (amountOut < minAmountOut) revert InsufficientAmountOut();
+
+        Token(token).transferFrom(msg.sender, address(this), amountIn);
+        grey.transfer(msg.sender, amountOut);
+
+        emit TokenSold(msg.sender, token, amountOut, amountIn);
+    }
+
+    function launchToken(address token) external returns (address uniswapV2Pair) {
+        Pair memory pair = pairs[token];
+        if (pair.virtualLiquidity == 0) revert InvalidToken();
+
+        uint256 actualLiquidity = pair.reserveGREY - pair.virtualLiquidity;
+        if (actualLiquidity < targetGREYRaised) {
+            revert TargetGREYRaisedNotReached();
+        }
+
+        delete pairs[token];
+
+        uint256 greyAmount = actualLiquidity;
+        uint256 tokenAmount = pair.reserveToken;
+
+        // Burn tokens equal to ratio of reserveGREY removed to maintain constant price
+        uint256 burnAmount = (pair.virtualLiquidity * tokenAmount) / pair.reserveGREY;
+        tokenAmount -= burnAmount;
+        Token(token).burn(burnAmount);
+
+        uniswapV2Pair = uniswapV2Factory.getPair(address(grey), address(token));
+        if (uniswapV2Pair == address(0)) {
+            uniswapV2Pair = uniswapV2Factory.createPair(address(grey), address(token));
+        }
+
+        grey.transfer(uniswapV2Pair, greyAmount);
+        Token(token).transfer(uniswapV2Pair, tokenAmount);
+
+        IUniswapV2Pair(uniswapV2Pair).mint(address(0xdEaD));
+
+        emit TokenLaunched(token, uniswapV2Pair);
+    }
+
+    // ======================================== VIEW FUNCTIONS ========================================
+
+    function previewBuyTokens(address token, uint256 amountIn) external view returns (uint256 amountOut) {
+        Pair memory pair = pairs[token];
+        amountOut = _getAmountOut(amountIn, pair.reserveGREY, pair.reserveToken);
+    }
+
+    function previewSellTokens(address token, uint256 amountIn) external view returns (uint256 amountOut) {
+        Pair memory pair = pairs[token];
+
+        amountOut = _getAmountOut(amountIn, pair.reserveToken, pair.reserveGREY);
+
+        uint256 actualLiquidity = pair.reserveGREY - pair.virtualLiquidity;
+        if (amountOut > actualLiquidity) revert InsufficientGREYLiquidity();
+    }
+
+    function tokenPrice(address token) external view returns (uint256 price) {
+        Pair memory pair = pairs[token];
+        price = pair.reserveGREY.divWadDown(pair.reserveToken);
+    }
+
+    function bondingCurveProgress(address token) external view returns (uint256 progress) {
+        Pair memory pair = pairs[token];
+        uint256 actualLiquidity = pair.reserveGREY - pair.virtualLiquidity;
+        progress = actualLiquidity.divWadDown(targetGREYRaised);
+    }
+
+    // ======================================== HELPER FUNCTIONS ========================================
+
+    function _buyTokens(address token, uint256 amountIn, uint256 minAmountOut) internal returns (uint256 amountOut) {
+        Pair storage pair = pairs[token];
+
+        amountOut = _getAmountOut(amountIn, pair.reserveGREY, pair.reserveToken);
+
+        pair.reserveGREY += amountIn;
+        pair.reserveToken -= amountOut;
+
+        if (amountOut < minAmountOut) revert InsufficientAmountOut();
+
+        grey.transferFrom(msg.sender, address(this), amountIn);
+        Token(token).transfer(msg.sender, amountOut);
+
+        emit TokenBought(msg.sender, token, amountIn, amountOut);
+    }
+
+    function _getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) internal pure returns (uint256) {
+        if (amountIn == 0) revert InsufficientAmountIn();
+        if (reserveIn == 0 || reserveOut == 0) revert InsufficientLiquidity();
+
+        return (amountIn * reserveOut) / (reserveIn + amountIn);
+    }
+}
+
+
+==================================================
+
+Path: Setup.sol
+Content:
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import {GREY} from "./lib/GREY.sol";
+import {UniswapV2Factory} from "./lib/v2-core/UniswapV2Factory.sol";
+import {Factory} from "./Factory.sol";
+import {Token} from "./Token.sol";
+
+contract Setup {
+    bool public claimed;
+
+    // GREY token
+    GREY public grey;
+
+    // Challenge contracts
+    UniswapV2Factory public uniswapV2Factory;
+    Factory public factory;
+    Token public meme;
+
+    constructor() {
+        // Deploy the GREY token contract
+        grey = new GREY();
+
+        // Mint 7 GREY for setup
+        grey.mint(address(this), 7 ether);
+
+        // Deploy challenge contracts
+        uniswapV2Factory = new UniswapV2Factory(address(0xdead));
+        factory = new Factory(address(grey), address(uniswapV2Factory), 2 ether, 6 ether);
+
+        // Create a meme token
+        (address _meme,) = factory.createToken("Meme", "MEME", bytes32(0), 0);
+        meme = Token(_meme);
+
+        // Buy 2 GREY worth of MEME
+        grey.approve(address(factory), 2 ether);
+        factory.buyTokens(_meme, 2 ether, 0);
+    }
+
+    // Note: Call this function to claim 5 GREY for the challenge
+    function claim() external {
+        require(!claimed, "already claimed");
+        claimed = true;
+
+        grey.transfer(msg.sender, 5 ether);
+    }
+
+    // Note: Challenge is solved when you have at least 5.965 GREY
+    function isSolved() external view returns (bool) {
+        return grey.balanceOf(msg.sender) >= 5.965 ether;
+    }
+}
+
+
+==================================================
+
+Path: Token.sol
+Content:
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.20;
+
+import {ERC20} from "./lib/solmate/ERC20.sol";
+
+contract Token is ERC20 {
+    error NotFactory();
+
+    uint256 public constant INITIAL_AMOUNT = 1000_000e18;
+
+    address public immutable factory;
+
+    constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol, 18) {
+        factory = msg.sender;
+
+        _mint(factory, INITIAL_AMOUNT);
+    }
+
+    function burn(uint256 amount) external {
+        if (msg.sender != factory) revert NotFactory();
+
+        _burn(msg.sender, amount);
+    }
+}
+
+
+==================================================
+
+Path: lib/GREY.sol
+Content:
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.20;
+
+/*
+Note: This is a simple ERC20 contract with minting capabilities, there's no bug here.
+*/
+contract GREY {
+    string constant public name     = "Grey Token";
+    string constant public symbol   = "GREY";
+    uint8  constant public decimals = 18;
+
+    event Transfer(address indexed from, address indexed to, uint256 amount);
+    event Approval(address indexed owner, address indexed spender, uint256 amount);
+
+    address private immutable owner;
+
+    uint256 public totalSupply;
+
+    mapping(address => uint256) public balanceOf;
+
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    constructor() {
+        owner = msg.sender;
+    }
+
+    function mint(address to, uint256 amount) external {
+        require(msg.sender == owner, "not owner");
+        
+        totalSupply += amount;
+        balanceOf[to] += amount;
+
+        emit Transfer(address(0), to, amount);
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        
+        emit Approval(msg.sender, spender, amount);
+
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        return transferFrom(msg.sender, to, amount);
+    }
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public returns (bool) {
+        if (from != msg.sender) allowance[from][msg.sender] -= amount;
+
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+
+        emit Transfer(from, to, amount);
+
+        return true;
+    }
+}
+
+==================================================
+
+Path: lib/v2-core/UniswapV2ERC20.sol
+Content:
+pragma solidity ^0.8.0;
+
+import './interfaces/IUniswapV2ERC20.sol';
+import './libraries/SafeMath.sol';
+
+contract UniswapV2ERC20 is IUniswapV2ERC20 {
+    using SafeMath for uint;
+
+    string public constant name = 'Uniswap V2';
+    string public constant symbol = 'UNI-V2';
+    uint8 public constant decimals = 18;
+    uint  public totalSupply;
+    mapping(address => uint) public balanceOf;
+    mapping(address => mapping(address => uint)) public allowance;
+
+    bytes32 public DOMAIN_SEPARATOR;
+    // keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+    bytes32 public constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
+    mapping(address => uint) public nonces;
+
+    constructor() {
+        uint chainId;
+        assembly {
+            chainId := chainid()
+        }
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256('EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)'),
+                keccak256(bytes(name)),
+                keccak256(bytes('1')),
+                chainId,
+                address(this)
+            )
+        );
+    }
+
+    function _mint(address to, uint value) internal {
+        totalSupply = totalSupply.add(value);
+        balanceOf[to] = balanceOf[to].add(value);
+        emit Transfer(address(0), to, value);
+    }
+
+    function _burn(address from, uint value) internal {
+        balanceOf[from] = balanceOf[from].sub(value);
+        totalSupply = totalSupply.sub(value);
+        emit Transfer(from, address(0), value);
+    }
+
+    function _approve(address owner, address spender, uint value) private {
+        allowance[owner][spender] = value;
+        emit Approval(owner, spender, value);
+    }
+
+    function _transfer(address from, address to, uint value) private {
+        balanceOf[from] = balanceOf[from].sub(value);
+        balanceOf[to] = balanceOf[to].add(value);
+        emit Transfer(from, to, value);
+    }
+
+    function approve(address spender, uint value) external returns (bool) {
+        _approve(msg.sender, spender, value);
+        return true;
+    }
+
+    function transfer(address to, uint value) external returns (bool) {
+        _transfer(msg.sender, to, value);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint value) external returns (bool) {
+        if (allowance[from][msg.sender] != type(uint256).max) {
+            allowance[from][msg.sender] = allowance[from][msg.sender].sub(value);
+        }
+        _transfer(from, to, value);
+        return true;
+    }
+
+    function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external {
+        require(deadline >= block.timestamp, 'UniswapV2: EXPIRED');
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                '\x19\x01',
+                DOMAIN_SEPARATOR,
+                keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, nonces[owner]++, deadline))
+            )
+        );
+        address recoveredAddress = ecrecover(digest, v, r, s);
+        require(recoveredAddress != address(0) && recoveredAddress == owner, 'UniswapV2: INVALID_SIGNATURE');
+        _approve(owner, spender, value);
+    }
+}
+
+
+==================================================
+
+Path: lib/v2-core/UniswapV2Factory.sol
+Content:
+pragma solidity ^0.8.0;
+
+import './interfaces/IUniswapV2Factory.sol';
+import './UniswapV2Pair.sol';
+
+contract UniswapV2Factory is IUniswapV2Factory {
+    address public feeTo;
+    address public feeToSetter;
+
+    mapping(address => mapping(address => address)) public getPair;
+    address[] public allPairs;
+    
+    constructor(address _feeToSetter) {
+        feeToSetter = _feeToSetter;
+    }
+
+    function allPairsLength() external view returns (uint) {
+        return allPairs.length;
+    }
+
+    function createPair(address tokenA, address tokenB) external returns (address pair) {
+        require(tokenA != tokenB, 'UniswapV2: IDENTICAL_ADDRESSES');
+        (address token0, address token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        require(token0 != address(0), 'UniswapV2: ZERO_ADDRESS');
+        require(getPair[token0][token1] == address(0), 'UniswapV2: PAIR_EXISTS'); // single check is sufficient
+        bytes memory bytecode = type(UniswapV2Pair).creationCode;
+        bytes32 salt = keccak256(abi.encodePacked(token0, token1));
+        assembly {
+            pair := create2(0, add(bytecode, 32), mload(bytecode), salt)
+        }
+        IUniswapV2Pair(pair).initialize(token0, token1);
+        getPair[token0][token1] = pair;
+        getPair[token1][token0] = pair; // populate mapping in the reverse direction
+        allPairs.push(pair);
+        emit PairCreated(token0, token1, pair, allPairs.length);
+    }
+
+    function setFeeTo(address _feeTo) external {
+        require(msg.sender == feeToSetter, 'UniswapV2: FORBIDDEN');
+        feeTo = _feeTo;
+    }
+
+    function setFeeToSetter(address _feeToSetter) external {
+        require(msg.sender == feeToSetter, 'UniswapV2: FORBIDDEN');
+        feeToSetter = _feeToSetter;
+    }
+}
+
+
+==================================================
+
+Path: lib/v2-core/UniswapV2Pair.sol
+Content:
+pragma solidity ^0.8.0;
+
+import './interfaces/IUniswapV2Pair.sol';
+import './UniswapV2ERC20.sol';
+import './libraries/Math.sol';
+import './libraries/UQ112x112.sol';
+import './interfaces/IERC20.sol';
+import './interfaces/IUniswapV2Factory.sol';
+import './interfaces/IUniswapV2Callee.sol';
+
+contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
+    using SafeMath  for uint;
+    using UQ112x112 for uint224;
+
+    uint public constant MINIMUM_LIQUIDITY = 10**3;
+    bytes4 private constant SELECTOR = bytes4(keccak256(bytes('transfer(address,uint256)')));
+
+    address public factory;
+    address public token0;
+    address public token1;
+
+    uint112 private reserve0;           // uses single storage slot, accessible via getReserves
+    uint112 private reserve1;           // uses single storage slot, accessible via getReserves
+    uint32  private blockTimestampLast; // uses single storage slot, accessible via getReserves
+
+    uint public price0CumulativeLast;
+    uint public price1CumulativeLast;
+    uint public kLast; // reserve0 * reserve1, as of immediately after the most recent liquidity event
+
+    uint private unlocked = 1;
+    modifier lock() {
+        require(unlocked == 1, 'UniswapV2: LOCKED');
+        unlocked = 0;
+        _;
+        unlocked = 1;
+    }
+
+    function getReserves() public view returns (uint112 _reserve0, uint112 _reserve1, uint32 _blockTimestampLast) {
+        _reserve0 = reserve0;
+        _reserve1 = reserve1;
+        _blockTimestampLast = blockTimestampLast;
+    }
+
+    function _safeTransfer(address token, address to, uint value) private {
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(SELECTOR, to, value));
+        require(success && (data.length == 0 || abi.decode(data, (bool))), 'UniswapV2: TRANSFER_FAILED');
+    }
+
+    constructor() {
+        factory = msg.sender;
+    }
+
+    // called once by the factory at time of deployment
+    function initialize(address _token0, address _token1) external {
+        require(msg.sender == factory, 'UniswapV2: FORBIDDEN'); // sufficient check
+        token0 = _token0;
+        token1 = _token1;
+    }
+
+    // update reserves and, on the first call per block, price accumulators
+    function _update(uint balance0, uint balance1, uint112 _reserve0, uint112 _reserve1) private {
+        require(balance0 <= type(uint112).max && balance1 <= type(uint112).max, 'UniswapV2: OVERFLOW');
+        uint32 blockTimestamp = uint32(block.timestamp % 2**32);
+        uint32 timeElapsed = blockTimestamp - blockTimestampLast; // overflow is desired
+        if (timeElapsed > 0 && _reserve0 != 0 && _reserve1 != 0) {
+            // * never overflows, and + overflow is desired
+            price0CumulativeLast += uint(UQ112x112.encode(_reserve1).uqdiv(_reserve0)) * timeElapsed;
+            price1CumulativeLast += uint(UQ112x112.encode(_reserve0).uqdiv(_reserve1)) * timeElapsed;
+        }
+        reserve0 = uint112(balance0);
+        reserve1 = uint112(balance1);
+        blockTimestampLast = blockTimestamp;
+        emit Sync(reserve0, reserve1);
+    }
+
+    // if fee is on, mint liquidity equivalent to 1/6th of the growth in sqrt(k)
+    function _mintFee(uint112 _reserve0, uint112 _reserve1) private returns (bool feeOn) {
+        address feeTo = IUniswapV2Factory(factory).feeTo();
+        feeOn = feeTo != address(0);
+        uint _kLast = kLast; // gas savings
+        if (feeOn) {
+            if (_kLast != 0) {
+                uint rootK = Math.sqrt(uint(_reserve0).mul(_reserve1));
+                uint rootKLast = Math.sqrt(_kLast);
+                if (rootK > rootKLast) {
+                    uint numerator = totalSupply.mul(rootK.sub(rootKLast));
+                    uint denominator = rootK.mul(5).add(rootKLast);
+                    uint liquidity = numerator / denominator;
+                    if (liquidity > 0) _mint(feeTo, liquidity);
+                }
+            }
+        } else if (_kLast != 0) {
+            kLast = 0;
+        }
+    }
+
+    // this low-level function should be called from a contract which performs important safety checks
+    function mint(address to) external lock returns (uint liquidity) {
+        (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
+        uint balance0 = IERC20(token0).balanceOf(address(this));
+        uint balance1 = IERC20(token1).balanceOf(address(this));
+        uint amount0 = balance0.sub(_reserve0);
+        uint amount1 = balance1.sub(_reserve1);
+
+        bool feeOn = _mintFee(_reserve0, _reserve1);
+        uint _totalSupply = totalSupply; // gas savings, must be defined here since totalSupply can update in _mintFee
+        if (_totalSupply == 0) {
+            liquidity = Math.sqrt(amount0.mul(amount1)).sub(MINIMUM_LIQUIDITY);
+           _mint(address(0), MINIMUM_LIQUIDITY); // permanently lock the first MINIMUM_LIQUIDITY tokens
+        } else {
+            liquidity = Math.min(amount0.mul(_totalSupply) / _reserve0, amount1.mul(_totalSupply) / _reserve1);
+        }
+        require(liquidity > 0, 'UniswapV2: INSUFFICIENT_LIQUIDITY_MINTED');
+        _mint(to, liquidity);
+
+        _update(balance0, balance1, _reserve0, _reserve1);
+        if (feeOn) kLast = uint(reserve0).mul(reserve1); // reserve0 and reserve1 are up-to-date
+        emit Mint(msg.sender, amount0, amount1);
+    }
+
+    // this low-level function should be called from a contract which performs important safety checks
+    function burn(address to) external lock returns (uint amount0, uint amount1) {
+        (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
+        address _token0 = token0;                                // gas savings
+        address _token1 = token1;                                // gas savings
+        uint balance0 = IERC20(_token0).balanceOf(address(this));
+        uint balance1 = IERC20(_token1).balanceOf(address(this));
+        uint liquidity = balanceOf[address(this)];
+
+        bool feeOn = _mintFee(_reserve0, _reserve1);
+        uint _totalSupply = totalSupply; // gas savings, must be defined here since totalSupply can update in _mintFee
+        amount0 = liquidity.mul(balance0) / _totalSupply; // using balances ensures pro-rata distribution
+        amount1 = liquidity.mul(balance1) / _totalSupply; // using balances ensures pro-rata distribution
+        require(amount0 > 0 && amount1 > 0, 'UniswapV2: INSUFFICIENT_LIQUIDITY_BURNED');
+        _burn(address(this), liquidity);
+        _safeTransfer(_token0, to, amount0);
+        _safeTransfer(_token1, to, amount1);
+        balance0 = IERC20(_token0).balanceOf(address(this));
+        balance1 = IERC20(_token1).balanceOf(address(this));
+
+        _update(balance0, balance1, _reserve0, _reserve1);
+        if (feeOn) kLast = uint(reserve0).mul(reserve1); // reserve0 and reserve1 are up-to-date
+        emit Burn(msg.sender, amount0, amount1, to);
+    }
+
+    // this low-level function should be called from a contract which performs important safety checks
+    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external lock {
+        require(amount0Out > 0 || amount1Out > 0, 'UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT');
+        (uint112 _reserve0, uint112 _reserve1,) = getReserves(); // gas savings
+        require(amount0Out < _reserve0 && amount1Out < _reserve1, 'UniswapV2: INSUFFICIENT_LIQUIDITY');
+
+        uint balance0;
+        uint balance1;
+        { // scope for _token{0,1}, avoids stack too deep errors
+        address _token0 = token0;
+        address _token1 = token1;
+        require(to != _token0 && to != _token1, 'UniswapV2: INVALID_TO');
+        if (amount0Out > 0) _safeTransfer(_token0, to, amount0Out); // optimistically transfer tokens
+        if (amount1Out > 0) _safeTransfer(_token1, to, amount1Out); // optimistically transfer tokens
+        if (data.length > 0) IUniswapV2Callee(to).uniswapV2Call(msg.sender, amount0Out, amount1Out, data);
+        balance0 = IERC20(_token0).balanceOf(address(this));
+        balance1 = IERC20(_token1).balanceOf(address(this));
+        }
+        uint amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
+        uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
+        require(amount0In > 0 || amount1In > 0, 'UniswapV2: INSUFFICIENT_INPUT_AMOUNT');
+        { // scope for reserve{0,1}Adjusted, avoids stack too deep errors
+        uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3));
+        uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
+        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K');
+        }
+
+        _update(balance0, balance1, _reserve0, _reserve1);
+        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+    }
+
+    // force balances to match reserves
+    function skim(address to) external lock {
+        address _token0 = token0; // gas savings
+        address _token1 = token1; // gas savings
+        _safeTransfer(_token0, to, IERC20(_token0).balanceOf(address(this)).sub(reserve0));
+        _safeTransfer(_token1, to, IERC20(_token1).balanceOf(address(this)).sub(reserve1));
+    }
+
+    // force reserves to match balances
+    function sync() external lock {
+        _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)), reserve0, reserve1);
+    }
+}
+
+
+==================================================
+
+Path: lib/v2-core/interfaces/IUniswapV2Factory.sol
+Content:
+pragma solidity ^0.8.0;
+
+interface IUniswapV2Factory {
+    event PairCreated(address indexed token0, address indexed token1, address pair, uint);
+
+    function feeTo() external view returns (address);
+    function feeToSetter() external view returns (address);
+
+    function getPair(address tokenA, address tokenB) external view returns (address pair);
+    function allPairs(uint) external view returns (address pair);
+    function allPairsLength() external view returns (uint);
+
+    function createPair(address tokenA, address tokenB) external returns (address pair);
+
+    function setFeeTo(address) external;
+    function setFeeToSetter(address) external;
+}
+
+
+==================================================
+
+Path: lib/v2-core/interfaces/IUniswapV2ERC20.sol
+Content:
+pragma solidity ^0.8.0;
+
+interface IUniswapV2ERC20 {
+    event Approval(address indexed owner, address indexed spender, uint value);
+    event Transfer(address indexed from, address indexed to, uint value);
+
+    function name() external pure returns (string memory);
+    function symbol() external pure returns (string memory);
+    function decimals() external pure returns (uint8);
+    function totalSupply() external view returns (uint);
+    function balanceOf(address owner) external view returns (uint);
+    function allowance(address owner, address spender) external view returns (uint);
+
+    function approve(address spender, uint value) external returns (bool);
+    function transfer(address to, uint value) external returns (bool);
+    function transferFrom(address from, address to, uint value) external returns (bool);
+
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+    function PERMIT_TYPEHASH() external pure returns (bytes32);
+    function nonces(address owner) external view returns (uint);
+
+    function permit(address owner, address spender, uint value, uint deadline, uint8 v, bytes32 r, bytes32 s) external;
+}
+
+
+==================================================
+
+Path: lib/v2-core/interfaces/IERC20.sol
+Content:
+pragma solidity ^0.8.0;
+
+interface IERC20 {
+    event Approval(address indexed owner, address indexed spender, uint value);
+    event Transfer(address indexed from, address indexed to, uint value);
+
+    function name() external view returns (string memory);
+    function symbol() external view returns (string memory);
+    function decimals() external view returns (uint8);
+    function totalSupply() external view returns (uint);
+    function balanceOf(address owner) external view returns (uint);
+    function allowance(address owner, address spender) external view returns (uint);
+
+    function approve(address spender, uint value) external returns (bool);
+    function transfer(address to, uint value) external returns (bool);
+    function transferFrom(address from, address to, uint value) external returns (bool);
+}
+
+
+==================================================
+
+Path: lib/v2-core/interfaces/IUniswapV2Callee.sol
+Content:
+pragma solidity ^0.8.0;
+
+interface IUniswapV2Callee {
+    function uniswapV2Call(address sender, uint amount0, uint amount1, bytes calldata data) external;
+}
+
+
+==================================================
+
+Path: lib/v2-core/interfaces/IUniswapV2Pair.sol
+Content:
+pragma solidity ^0.8.0;
+
+interface IUniswapV2Pair {
+    event Mint(address indexed sender, uint amount0, uint amount1);
+    event Burn(address indexed sender, uint amount0, uint amount1, address indexed to);
+    event Swap(
+        address indexed sender,
+        uint amount0In,
+        uint amount1In,
+        uint amount0Out,
+        uint amount1Out,
+        address indexed to
+    );
+    event Sync(uint112 reserve0, uint112 reserve1);
+
+    function MINIMUM_LIQUIDITY() external pure returns (uint);
+    function factory() external view returns (address);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    function price0CumulativeLast() external view returns (uint);
+    function price1CumulativeLast() external view returns (uint);
+    function kLast() external view returns (uint);
+
+    function mint(address to) external returns (uint liquidity);
+    function burn(address to) external returns (uint amount0, uint amount1);
+    function swap(uint amount0Out, uint amount1Out, address to, bytes calldata data) external;
+    function skim(address to) external;
+    function sync() external;
+
+    function initialize(address, address) external;
+}
+
+
+==================================================
+
+Path: lib/v2-core/libraries/UQ112x112.sol
+Content:
+pragma solidity ^0.8.0;
+
+// a library for handling binary fixed point numbers (https://en.wikipedia.org/wiki/Q_(number_format))
+
+// range: [0, 2**112 - 1]
+// resolution: 1 / 2**112
+
+library UQ112x112 {
+    uint224 constant Q112 = 2**112;
+
+    // encode a uint112 as a UQ112x112
+    function encode(uint112 y) internal pure returns (uint224 z) {
+        z = uint224(y) * Q112; // never overflows
+    }
+
+    // divide a UQ112x112 by a uint112, returning a UQ112x112
+    function uqdiv(uint224 x, uint112 y) internal pure returns (uint224 z) {
+        z = x / uint224(y);
+    }
+}
+
+
+==================================================
+
+Path: lib/v2-core/libraries/Math.sol
+Content:
+pragma solidity ^0.8.0;
+
+// a library for performing various math operations
+
+library Math {
+    function min(uint x, uint y) internal pure returns (uint z) {
+        z = x < y ? x : y;
+    }
+
+    // babylonian method (https://en.wikipedia.org/wiki/Methods_of_computing_square_roots#Babylonian_method)
+    function sqrt(uint y) internal pure returns (uint z) {
+        if (y > 3) {
+            z = y;
+            uint x = y / 2 + 1;
+            while (x < z) {
+                z = x;
+                x = (y / x + x) / 2;
+            }
+        } else if (y != 0) {
+            z = 1;
+        }
+    }
+}
+
+
+==================================================
+
+Path: lib/v2-core/libraries/SafeMath.sol
+Content:
+pragma solidity ^0.8.0;
+
+// a library for performing overflow-safe math, courtesy of DappHub (https://github.com/dapphub/ds-math)
+
+library SafeMath {
+    function add(uint x, uint y) internal pure returns (uint z) {
+        require((z = x + y) >= x, 'ds-math-add-overflow');
+    }
+
+    function sub(uint x, uint y) internal pure returns (uint z) {
+        require((z = x - y) <= x, 'ds-math-sub-underflow');
+    }
+
+    function mul(uint x, uint y) internal pure returns (uint z) {
+        require(y == 0 || (z = x * y) / y == x, 'ds-math-mul-overflow');
+    }
+}
+
+
+==================================================
+
+Path: lib/solmate/ERC20.sol
+Content:
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity >=0.8.0;
+
+/// @notice Modern and gas efficient ERC20 + EIP-2612 implementation.
+/// @author Solmate (https://github.com/transmissions11/solmate/blob/main/src/tokens/ERC20.sol)
+/// @author Modified from Uniswap (https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/UniswapV2ERC20.sol)
+/// @dev Do not manually set balances without updating totalSupply, as the sum of all user balances must not exceed it.
+abstract contract ERC20 {
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    event Transfer(address indexed from, address indexed to, uint256 amount);
+
+    event Approval(address indexed owner, address indexed spender, uint256 amount);
+
+    /*//////////////////////////////////////////////////////////////
+                            METADATA STORAGE
+    //////////////////////////////////////////////////////////////*/
+
+    string public name;
+
+    string public symbol;
+
+    uint8 public immutable decimals;
+
+    /*//////////////////////////////////////////////////////////////
+                              ERC20 STORAGE
+    //////////////////////////////////////////////////////////////*/
+
+    uint256 public totalSupply;
+
+    mapping(address => uint256) public balanceOf;
+
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    /*//////////////////////////////////////////////////////////////
+                            EIP-2612 STORAGE
+    //////////////////////////////////////////////////////////////*/
+
+    uint256 internal immutable INITIAL_CHAIN_ID;
+
+    bytes32 internal immutable INITIAL_DOMAIN_SEPARATOR;
+
+    mapping(address => uint256) public nonces;
+
+    /*//////////////////////////////////////////////////////////////
+                               CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
+    constructor(
+        string memory _name,
+        string memory _symbol,
+        uint8 _decimals
+    ) {
+        name = _name;
+        symbol = _symbol;
+        decimals = _decimals;
+
+        INITIAL_CHAIN_ID = block.chainid;
+        INITIAL_DOMAIN_SEPARATOR = computeDomainSeparator();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                               ERC20 LOGIC
+    //////////////////////////////////////////////////////////////*/
+
+    function approve(address spender, uint256 amount) public virtual returns (bool) {
+        allowance[msg.sender][spender] = amount;
+
+        emit Approval(msg.sender, spender, amount);
+
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) public virtual returns (bool) {
+        balanceOf[msg.sender] -= amount;
+
+        // Cannot overflow because the sum of all user
+        // balances can't exceed the max uint256 value.
+        unchecked {
+            balanceOf[to] += amount;
+        }
+
+        emit Transfer(msg.sender, to, amount);
+
+        return true;
+    }
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual returns (bool) {
+        uint256 allowed = allowance[from][msg.sender]; // Saves gas for limited approvals.
+
+        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
+
+        balanceOf[from] -= amount;
+
+        // Cannot overflow because the sum of all user
+        // balances can't exceed the max uint256 value.
+        unchecked {
+            balanceOf[to] += amount;
+        }
+
+        emit Transfer(from, to, amount);
+
+        return true;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             EIP-2612 LOGIC
+    //////////////////////////////////////////////////////////////*/
+
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public virtual {
+        require(deadline >= block.timestamp, "PERMIT_DEADLINE_EXPIRED");
+
+        // Unchecked because the only math done is incrementing
+        // the owner's nonce which cannot realistically overflow.
+        unchecked {
+            address recoveredAddress = ecrecover(
+                keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        DOMAIN_SEPARATOR(),
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"
+                                ),
+                                owner,
+                                spender,
+                                value,
+                                nonces[owner]++,
+                                deadline
+                            )
+                        )
+                    )
+                ),
+                v,
+                r,
+                s
+            );
+
+            require(recoveredAddress != address(0) && recoveredAddress == owner, "INVALID_SIGNER");
+
+            allowance[recoveredAddress][spender] = value;
+        }
+
+        emit Approval(owner, spender, value);
+    }
+
+    function DOMAIN_SEPARATOR() public view virtual returns (bytes32) {
+        return block.chainid == INITIAL_CHAIN_ID ? INITIAL_DOMAIN_SEPARATOR : computeDomainSeparator();
+    }
+
+    function computeDomainSeparator() internal view virtual returns (bytes32) {
+        return
+            keccak256(
+                abi.encode(
+                    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                    keccak256(bytes(name)),
+                    keccak256("1"),
+                    block.chainid,
+                    address(this)
+                )
+            );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        INTERNAL MINT/BURN LOGIC
+    //////////////////////////////////////////////////////////////*/
+
+    function _mint(address to, uint256 amount) internal virtual {
+        totalSupply += amount;
+
+        // Cannot overflow because the sum of all user
+        // balances can't exceed the max uint256 value.
+        unchecked {
+            balanceOf[to] += amount;
+        }
+
+        emit Transfer(address(0), to, amount);
+    }
+
+    function _burn(address from, uint256 amount) internal virtual {
+        balanceOf[from] -= amount;
+
+        // Cannot underflow because a user's balance
+        // will never be larger than the total supply.
+        unchecked {
+            totalSupply -= amount;
+        }
+
+        emit Transfer(from, address(0), amount);
+    }
+}
+
+
+==================================================
+
+Path: lib/solmate/FixedPointMathLib.sol
+Content:
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity >=0.8.0;
+
+/// @notice Arithmetic library with operations for fixed-point numbers.
+/// @author Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/FixedPointMathLib.sol)
+/// @author Inspired by USM (https://github.com/usmfum/USM/blob/master/contracts/WadMath.sol)
+library FixedPointMathLib {
+    /*//////////////////////////////////////////////////////////////
+                    SIMPLIFIED FIXED POINT OPERATIONS
+    //////////////////////////////////////////////////////////////*/
+
+    uint256 internal constant MAX_UINT256 = 2**256 - 1;
+
+    uint256 internal constant WAD = 1e18; // The scalar of ETH and most ERC20s.
+
+    function mulWadDown(uint256 x, uint256 y) internal pure returns (uint256) {
+        return mulDivDown(x, y, WAD); // Equivalent to (x * y) / WAD rounded down.
+    }
+
+    function mulWadUp(uint256 x, uint256 y) internal pure returns (uint256) {
+        return mulDivUp(x, y, WAD); // Equivalent to (x * y) / WAD rounded up.
+    }
+
+    function divWadDown(uint256 x, uint256 y) internal pure returns (uint256) {
+        return mulDivDown(x, WAD, y); // Equivalent to (x * WAD) / y rounded down.
+    }
+
+    function divWadUp(uint256 x, uint256 y) internal pure returns (uint256) {
+        return mulDivUp(x, WAD, y); // Equivalent to (x * WAD) / y rounded up.
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    LOW LEVEL FIXED POINT OPERATIONS
+    //////////////////////////////////////////////////////////////*/
+
+    function mulDivDown(
+        uint256 x,
+        uint256 y,
+        uint256 denominator
+    ) internal pure returns (uint256 z) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            // Equivalent to require(denominator != 0 && (y == 0 || x <= type(uint256).max / y))
+            if iszero(mul(denominator, iszero(mul(y, gt(x, div(MAX_UINT256, y)))))) {
+                revert(0, 0)
+            }
+
+            // Divide x * y by the denominator.
+            z := div(mul(x, y), denominator)
+        }
+    }
+
+    function mulDivUp(
+        uint256 x,
+        uint256 y,
+        uint256 denominator
+    ) internal pure returns (uint256 z) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            // Equivalent to require(denominator != 0 && (y == 0 || x <= type(uint256).max / y))
+            if iszero(mul(denominator, iszero(mul(y, gt(x, div(MAX_UINT256, y)))))) {
+                revert(0, 0)
+            }
+
+            // If x * y modulo the denominator is strictly greater than 0,
+            // 1 is added to round up the division of x * y by the denominator.
+            z := add(gt(mod(mul(x, y), denominator), 0), div(mul(x, y), denominator))
+        }
+    }
+
+    function rpow(
+        uint256 x,
+        uint256 n,
+        uint256 scalar
+    ) internal pure returns (uint256 z) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            switch x
+            case 0 {
+                switch n
+                case 0 {
+                    // 0 ** 0 = 1
+                    z := scalar
+                }
+                default {
+                    // 0 ** n = 0
+                    z := 0
+                }
+            }
+            default {
+                switch mod(n, 2)
+                case 0 {
+                    // If n is even, store scalar in z for now.
+                    z := scalar
+                }
+                default {
+                    // If n is odd, store x in z for now.
+                    z := x
+                }
+
+                // Shifting right by 1 is like dividing by 2.
+                let half := shr(1, scalar)
+
+                for {
+                    // Shift n right by 1 before looping to halve it.
+                    n := shr(1, n)
+                } n {
+                    // Shift n right by 1 each iteration to halve it.
+                    n := shr(1, n)
+                } {
+                    // Revert immediately if x ** 2 would overflow.
+                    // Equivalent to iszero(eq(div(xx, x), x)) here.
+                    if shr(128, x) {
+                        revert(0, 0)
+                    }
+
+                    // Store x squared.
+                    let xx := mul(x, x)
+
+                    // Round to the nearest number.
+                    let xxRound := add(xx, half)
+
+                    // Revert if xx + half overflowed.
+                    if lt(xxRound, xx) {
+                        revert(0, 0)
+                    }
+
+                    // Set x to scaled xxRound.
+                    x := div(xxRound, scalar)
+
+                    // If n is even:
+                    if mod(n, 2) {
+                        // Compute z * x.
+                        let zx := mul(z, x)
+
+                        // If z * x overflowed:
+                        if iszero(eq(div(zx, x), z)) {
+                            // Revert if x is non-zero.
+                            if iszero(iszero(x)) {
+                                revert(0, 0)
+                            }
+                        }
+
+                        // Round to the nearest number.
+                        let zxRound := add(zx, half)
+
+                        // Revert if zx + half overflowed.
+                        if lt(zxRound, zx) {
+                            revert(0, 0)
+                        }
+
+                        // Return properly scaled zxRound.
+                        z := div(zxRound, scalar)
+                    }
+                }
+            }
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        GENERAL NUMBER UTILITIES
+    //////////////////////////////////////////////////////////////*/
+
+    function sqrt(uint256 x) internal pure returns (uint256 z) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let y := x // We start y at x, which will help us make our initial estimate.
+
+            z := 181 // The "correct" value is 1, but this saves a multiplication later.
+
+            // This segment is to get a reasonable initial estimate for the Babylonian method. With a bad
+            // start, the correct # of bits increases ~linearly each iteration instead of ~quadratically.
+
+            // We check y >= 2^(k + 8) but shift right by k bits
+            // each branch to ensure that if x >= 256, then y >= 256.
+            if iszero(lt(y, 0x10000000000000000000000000000000000)) {
+                y := shr(128, y)
+                z := shl(64, z)
+            }
+            if iszero(lt(y, 0x1000000000000000000)) {
+                y := shr(64, y)
+                z := shl(32, z)
+            }
+            if iszero(lt(y, 0x10000000000)) {
+                y := shr(32, y)
+                z := shl(16, z)
+            }
+            if iszero(lt(y, 0x1000000)) {
+                y := shr(16, y)
+                z := shl(8, z)
+            }
+
+            // Goal was to get z*z*y within a small factor of x. More iterations could
+            // get y in a tighter range. Currently, we will have y in [256, 256*2^16).
+            // We ensured y >= 256 so that the relative difference between y and y+1 is small.
+            // That's not possible if x < 256 but we can just verify those cases exhaustively.
+
+            // Now, z*z*y <= x < z*z*(y+1), and y <= 2^(16+8), and either y >= 256, or x < 256.
+            // Correctness can be checked exhaustively for x < 256, so we assume y >= 256.
+            // Then z*sqrt(y) is within sqrt(257)/sqrt(256) of sqrt(x), or about 20bps.
+
+            // For s in the range [1/256, 256], the estimate f(s) = (181/1024) * (s+1) is in the range
+            // (1/2.84 * sqrt(s), 2.84 * sqrt(s)), with largest error when s = 1 and when s = 256 or 1/256.
+
+            // Since y is in [256, 256*2^16), let a = y/65536, so that a is in [1/256, 256). Then we can estimate
+            // sqrt(y) using sqrt(65536) * 181/1024 * (a + 1) = 181/4 * (y + 65536)/65536 = 181 * (y + 65536)/2^18.
+
+            // There is no overflow risk here since y < 2^136 after the first branch above.
+            z := shr(18, mul(z, add(y, 65536))) // A mul() is saved from starting z at 181.
+
+            // Given the worst case multiplicative error of 2.84 above, 7 iterations should be enough.
+            z := shr(1, add(z, div(x, z)))
+            z := shr(1, add(z, div(x, z)))
+            z := shr(1, add(z, div(x, z)))
+            z := shr(1, add(z, div(x, z)))
+            z := shr(1, add(z, div(x, z)))
+            z := shr(1, add(z, div(x, z)))
+            z := shr(1, add(z, div(x, z)))
+
+            // If x+1 is a perfect square, the Babylonian method cycles between
+            // floor(sqrt(x)) and ceil(sqrt(x)). This statement ensures we return floor.
+            // See: https://en.wikipedia.org/wiki/Integer_square_root#Using_only_integer_division
+            // Since the ceil is rare, we save gas on the assignment and repeat division in the rare case.
+            // If you don't care whether the floor or ceil square root is returned, you can remove this statement.
+            z := sub(z, lt(div(x, z), z))
+        }
+    }
+
+    function unsafeMod(uint256 x, uint256 y) internal pure returns (uint256 z) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            // Mod x by y. Note this will return
+            // 0 instead of reverting if y is zero.
+            z := mod(x, y)
+        }
+    }
+
+    function unsafeDiv(uint256 x, uint256 y) internal pure returns (uint256 r) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            // Divide x by y. Note this will return
+            // 0 instead of reverting if y is zero.
+            r := div(x, y)
+        }
+    }
+
+    function unsafeDivUp(uint256 x, uint256 y) internal pure returns (uint256 z) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            // Add 1 to x * y if x % y > 0. Note this will
+            // return 0 instead of reverting if y is zero.
+            z := add(gt(mod(x, y), 0), div(x, y))
+        }
+    }
+}
+
+==================================================
+
+Path: lib/solmate/Owned.sol
+Content:
+// SPDX-License-Identifier: AGPL-3.0-only
+pragma solidity >=0.8.0;
+
+/// @notice Simple single owner authorization mixin.
+/// @author Solmate (https://github.com/transmissions11/solmate/blob/main/src/auth/Owned.sol)
+abstract contract Owned {
+    /*//////////////////////////////////////////////////////////////
+                                 EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    event OwnershipTransferred(address indexed user, address indexed newOwner);
+
+    /*//////////////////////////////////////////////////////////////
+                            OWNERSHIP STORAGE
+    //////////////////////////////////////////////////////////////*/
+
+    address public owner;
+
+    modifier onlyOwner() virtual {
+        require(msg.sender == owner, "UNAUTHORIZED");
+
+        _;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                               CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
+    constructor(address _owner) {
+        owner = _owner;
+
+        emit OwnershipTransferred(address(0), _owner);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             OWNERSHIP LOGIC
+    //////////////////////////////////////////////////////////////*/
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        owner = newOwner;
+
+        emit OwnershipTransferred(msg.sender, newOwner);
+    }
+}
+
+==================================================
+
