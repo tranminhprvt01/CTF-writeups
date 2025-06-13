@@ -1,0 +1,66 @@
+#!/usr/local/bin/python
+import json
+import numpy as np
+import time
+
+ATTEMPTS=5000
+FLAG = "pearl{fake_flag}"
+KEY_SIZE = 8  
+ALLOWED_CHARS = np.array(
+    list(range(48, 58)) + list(range(65, 91)) + list(range(97, 123)), dtype=np.uint8
+)
+
+with open("anagram.json") as f:
+    ngrams = json.load(f)
+
+with open("story.txt", "rb") as f:
+    PLAIN = f.read()
+    PLAIN = np.frombuffer(PLAIN, dtype=np.uint8)
+
+random_indices = np.random.randint(0, len(ALLOWED_CHARS), size=KEY_SIZE)
+random_key = ALLOWED_CHARS[random_indices]  # Select random key from allowed chars
+keystream = np.resize(random_key, PLAIN.shape)
+
+CT_ARR=PLAIN ^ keystream
+
+trigram_table = np.full((256, 256, 256), -25, dtype=np.int16)
+for k, v in ngrams.items():
+    try:
+        b = k.encode()
+        if len(b) == 3:
+            trigram_table[b[0], b[1], b[2]] = v
+    except Exception:
+        continue
+
+def vectorized_fitness(arr):
+    trigrams = np.lib.stride_tricks.sliding_window_view(arr, 3)
+    scores = trigram_table[trigrams[:, 0], trigrams[:, 1], trigrams[:, 2]]
+    return int(scores.sum())
+
+plaintext_score = vectorized_fitness(PLAIN)
+ciphertext_score = vectorized_fitness(CT_ARR)
+
+offset = vectorized_fitness(CT_ARR)
+target_score = plaintext_score - offset
+
+while ATTEMPTS>=0:
+    ATTEMPTS=ATTEMPTS-1
+    input_key = input(f"\nEnter the decryption key ({KEY_SIZE} characters, or 'exit' to quit): ")
+
+    if len(input_key) != KEY_SIZE:
+        print(f"Error: Key must be exactly {KEY_SIZE} characters long.")
+    else:
+        key = np.array([ord(char) for char in input_key], dtype=np.uint8)
+        keystream = np.resize(key, CT_ARR.shape)
+        decrypted = CT_ARR ^ keystream
+
+        score = vectorized_fitness(decrypted) - offset
+
+        print(f"Score: {score}")
+        print(f"Target Score: {target_score}")
+
+        if score == target_score:
+            print(f"Decryption successful! The key is correct.\n{FLAG}")
+            break
+    time.sleep(0.1)
+print("\n\nbye_bye")

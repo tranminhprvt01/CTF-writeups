@@ -1,0 +1,147 @@
+from pwn import *
+from Crypto.Util.number import *
+
+
+
+import itertools
+
+def small_roots(f, bounds, m=1, d=None):
+	if not d:
+		d = f.degree()
+
+	if isinstance(f, Polynomial):
+		x, = polygens(f.base_ring(), f.variable_name(), 1)
+		f = f(x)
+
+	R = f.base_ring()
+	N = R.cardinality()
+	
+	f /= f.coefficients().pop(0)
+	f = f.change_ring(ZZ)
+
+	G = Sequence([], f.parent())
+	for i in range(m+1):
+		base = N^(m-i) * f^i
+		for shifts in itertools.product(range(d), repeat=f.nvariables()):
+			g = base * prod(map(power, f.variables(), shifts))
+			G.append(g)
+
+	B, monomials = G.coefficient_matrix()
+	monomials = vector(monomials)
+
+	factors = [monomial(*bounds) for monomial in monomials]
+	for i, factor in enumerate(factors):
+		B.rescale_col(i, factor)
+
+	B = B.dense_matrix().LLL()
+
+	B = B.change_ring(QQ)
+	for i, factor in enumerate(factors):
+		B.rescale_col(i, 1/factor)
+
+	H = Sequence([], f.parent().change_ring(QQ))
+	for h in filter(None, B*monomials):
+		H.append(h)
+		I = H.ideal()
+		if I.dimension() == -1:
+			H.pop()
+		elif I.dimension() == 0:
+			roots = []
+			for root in I.variety(ring=ZZ):
+				root = tuple(R(root[var]) for var in f.variables())
+				roots.append(root)
+			return roots
+
+	return []
+
+
+
+
+N = 128134160623834514804190012838497659744559662971015449992742073261127899204627514400519744946918210411041809618188694716954631963628028483173612071660003564406245581339496966919577443709945261868529023522932989623577005570770318555545829416559256628409790858255069196868638535981579544864087110789571665244161
+e = 65537
+sig = 20661001899082038314677406680643845704517079727331364133442054045393583514677972720637608461085964711216045721340073161354294542882374724777349428076118583374204393298507730977308343378120231535513191849991112740159641542630971203726024554641972313611321807388512576263009358133517944367899713953992857054626
+
+
+msg = b"Sign \""  + b"\x00"*5 +  b"\" for flag. Cheers, "
+
+message = b"Sign \"admin\" for flag. Cheers, "
+
+
+print(bytes_to_long(msg))
+
+m_ = bytes_to_long(msg)
+
+
+x = bytes_to_long(message) - m_
+print(x, "check")
+
+print(long_to_bytes(x))
+
+
+
+
+
+
+
+
+
+
+
+"""
+P.<x> = PolynomialRing(Zmod(N))
+
+
+m = bytes_to_long(msg)
+
+f = sig^e - m - x
+
+print(f)
+
+
+print(small_roots(f, [2^80], 5, 5))
+
+
+
+print((sig^e - m) % N)
+"""
+
+
+
+# io = remote("chall.polygl0ts.ch", "9024")
+# io.interactive()
+
+
+
+
+
+p = getPrime(512)
+q = getPrime(512)
+
+
+n = p*q
+#n = 59027619659140162246231818625815340974842442112232644436350228018748478988466535765408301673658734129439187696269696501069832697043279968118685239136552136293681067804356362747295747296666647706694937233705550520417871832785085628194065053686237984224944963442813278325830952036750281217842891518922333035401
+e = 0x10001
+phi = (p-1)*(q-1)
+d = int(inverse(e, phi))
+#d = 58024266312171546948883721429587892512966334256929118704289038858230209833742460497351099664649230645602648716858914165866942823773123966402338513525094180056187358846240238308570829127394547789207819033308921203701265531763861520239606176349544573665881097098423326465390092093757416991593778771562144112001
+
+m1 = b'abc'
+m2 = b'abcd'
+
+m1 = bytes_to_long(m1)
+m2 = bytes_to_long(m2)
+
+s1 = pow(m1, d, n)
+s2 = pow(m2, d, n)
+
+
+print(m1)
+print(m2)
+
+
+print(s1)
+print(s2)
+
+
+
+print(n)

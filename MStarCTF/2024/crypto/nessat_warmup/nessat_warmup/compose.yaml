@@ -1,0 +1,13 @@
+name: nessat
+services:
+  server:
+    build: .
+    ports:
+      - "7574:7574"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 1000M
+    environment:
+      FLAG: "mctf{fake_flag}"
