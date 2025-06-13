@@ -1,0 +1,90 @@
+Metadata-Version: 2.1
+Name: vector-bundle
+Version: 0.1.0
+Summary: A sage package implementing vector bundles on algebraic curves using only function fields
+Home-page: https://git.disroot.org/montessiel/vector-bundles-sagemath
+Author: Mickaël Montessinos
+Author-email: mickael.montessinos@mif.vu.lt
+License: GPLv2+
+Keywords: Algebraic Geometry Number Theory Curves Vector Bundles
+Platform: UNKNOWN
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Software Development :: Build Tools
+Classifier: Topic :: Scientific/Engineering :: Mathematics
+Classifier: License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)
+Classifier: Programming Language :: Python :: 3.7
+Description-Content-Type: text/markdown
+License-File: LICENSE
+
+# Vector Bundles
+
+This is a [Sagemath](http://www.sagemath.org) package implementing algorithms
+for creating and manipulating Vector Bundles over algebraic curves on finite
+field (some features should work on infinite field and most algorithms are 
+valid, but there is no guarantee for the implementation). All manipulations are 
+done using algebra on function fields. This implements algorithms from
+[this work](https://arxiv.org/abs/2403.09449).
+
+This package was developped and tested using Sage version 10.3. There is no
+guarantee that it will work with an older version of Sage. For instance,
+structural differences in the function_field package of sage prevents
+vector_bundle from working with Sage version 9.2 and earlier. Please let me
+know wheter vector_bundle works for you if you use a version of Sage between 9.2
+and 10.3.
+
+## Installation
+
+### If sage is built from source
+
+Download the source from the git repository:
+
+    $ git clone https://git.disroot.org/montessiel/vector-bundles-sagemath.git
+
+Run the following from the root directory of the cloned repository:
+
+    $ sage -pip install --upgrade --no-index -v .
+
+For convenience this package contains a makefile with this
+and other often used commands. Should you wish too, you can use the 
+shorthand:
+
+    $ make install
+
+### Using the package without installation
+
+If you did not build Sage from sources, you can use this package without
+installing it. Download the source using.
+
+    $ git clone https://git.disroot.org/montessiel/vector-bundles-sagemath.git
+
+Reun the following from the root directory:
+
+    $ sage -python setup.py build_ext --inplace
+
+Add the `vector_bundle` directory to your Python `sys.path`
+
+## Usage
+
+Once the package is installed, you can use it in Sage with:
+
+    sage: from vector_bundle import *
+
+See also the demo notebook `demo.ipynb>` and the documentation.
+
+## Documentation
+
+The documentation of the package can be generated using Sage's
+``Sphinx`` installation::
+
+    $ cd docs
+    $ sage -sh -c "make html"
+
+You may also find an online version of the documentation [here](http://montessinos.fr/mickael/vector_bundle_doc/).
+
+## Warning
+
+This project is still young, and does not fully use the features of Sage. As
+these are integrated later on, they may come with breaking changes.
+
+

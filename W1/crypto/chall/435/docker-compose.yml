@@ -1,0 +1,5 @@
+services:
+  hehe:
+    build: ./
+    ports:
+      - "12345:1337"

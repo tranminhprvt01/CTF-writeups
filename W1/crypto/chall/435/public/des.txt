@@ -1,0 +1,7 @@
+Don't be scared, don't be afraid
+Cuz 435 comes to save the day
+
+author: tranminhprvt01
+Point: 250
+
+Flag format: W1{ s0m3_r3ad4ble_5tr1ng_like_7his + <md5(s0m3_r3ad4ble_5tr1ng_like_7his).hex()> }

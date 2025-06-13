@@ -1,0 +1,146 @@
+[0;31mSignature:[0m     
+[0mdiscrete_log[0m[0;34m([0m[0;34m[0m
+[0;34m[0m    [0ma[0m[0;34m,[0m[0;34m[0m
+[0;34m[0m    [0mbase[0m[0;34m,[0m[0;34m[0m
+[0;34m[0m    [0mord[0m[0;34m=[0m[0;32mNone[0m[0;34m,[0m[0;34m[0m
+[0;34m[0m    [0mbounds[0m[0;34m=[0m[0;32mNone[0m[0;34m,[0m[0;34m[0m
+[0;34m[0m    [0moperation[0m[0;34m=[0m[0;34m'*'[0m[0;34m,[0m[0;34m[0m
+[0;34m[0m    [0midentity[0m[0;34m=[0m[0;32mNone[0m[0;34m,[0m[0;34m[0m
+[0;34m[0m    [0minverse[0m[0;34m=[0m[0;32mNone[0m[0;34m,[0m[0;34m[0m
+[0;34m[0m    [0mop[0m[0;34m=[0m[0;32mNone[0m[0;34m,[0m[0;34m[0m
+[0;34m[0m[0;34m)[0m[0;34m[0m[0;34m[0m[0m
+[0;31mDocstring:[0m     
+   Totally generic discrete log function.
+
+   INPUT:
+
+   * "a"    - group element
+
+   * "base" - group element (the base)
+
+   * "ord"  - integer (multiple of order of base, or "None")
+
+   * "bounds" - a priori bounds on the log
+
+   * "operation" - string: '*', '+', 'other'
+
+   * "identity" - the group's identity
+
+   * "inverse()" - function of 1 argument "x" returning inverse of "x"
+
+   * "op()" - function of 2 arguments "x", "y" returning "x*y" in
+     group
+
+   "a" and "base" must be elements of some group with identity given
+   by identity, inverse of "x" by "inverse(x)", and group operation on
+   "x", "y" by "op(x,y)".
+
+   If operation is '*' or '+' then the other arguments are provided
+   automatically; otherwise they must be provided by the caller.
+
+   OUTPUT: Returns an integer n such that b^n = a (or nb = a),
+   assuming that "ord" is a multiple of the order of the base b. If
+   "ord" is not specified, an attempt is made to compute it.
+
+   If no such n exists, this function raises a ValueError exception.
+
+   Warning:
+
+     If "x" has a log method, it is likely to be vastly faster than
+     using this function.  E.g., if "x" is an integer modulo n, use
+     its log method instead!
+
+   ALGORITHM: Pohlig-Hellman and Baby step giant step.
+
+   EXAMPLES:
+
+      sage: b = Mod(2,37);  a = b^20
+      sage: discrete_log(a, b)
+      20
+      sage: b = Mod(2,997);  a = b^20
+      sage: discrete_log(a, b)
+      20
+
+      sage: K = GF(3^6,'b')
+      sage: b = K.gen()
+      sage: a = b^210
+      sage: discrete_log(a, b, K.order()-1)
+      210
+
+      sage: b = Mod(1,37);  x = Mod(2,37)
+      sage: discrete_log(x, b)
+      Traceback (most recent call last):
+      ...
+      ValueError: No discrete log of 2 found to base 1
+      sage: b = Mod(1,997);  x = Mod(2,997)
+      sage: discrete_log(x, b)
+      Traceback (most recent call last):
+      ...
+      ValueError: No discrete log of 2 found to base 1
+
+   See https://trac.sagemath.org/2356:
+
+      sage: F.<w> = GF(121)
+      sage: v = w^120
+      sage: v.log(w)
+      0
+
+      sage: K.<z>=CyclotomicField(230)
+      sage: w=z^50
+      sage: discrete_log(w,z)
+      50
+
+   An example where the order is infinite: note that we must give an
+   upper bound here:
+
+      sage: K.<a> = QuadraticField(23)
+      sage: eps = 5*a-24        # a fundamental unit
+      sage: eps.multiplicative_order()
+      +Infinity
+      sage: eta = eps^100
+      sage: discrete_log(eta,eps,bounds=(0,1000))
+      100
+
+   In this case we cannot detect negative powers:
+
+      sage: eta = eps^(-3)
+      sage: discrete_log(eta,eps,bounds=(0,100))
+      Traceback (most recent call last):
+      ...
+      ValueError: No discrete log of -11515*a - 55224 found to base 5*a - 24
+
+   But we can invert the base (and negate the result) instead:
+
+      sage: - discrete_log(eta^-1,eps,bounds=(0,100))
+      -3
+
+   An additive example: elliptic curve DLOG:
+
+      sage: F=GF(37^2,'a')
+      sage: E=EllipticCurve(F,[1,1])
+      sage: F.<a>=GF(37^2,'a')
+      sage: E=EllipticCurve(F,[1,1])
+      sage: P=E(25*a + 16 , 15*a + 7 )
+      sage: P.order()
+      672
+      sage: Q=39*P; Q
+      (36*a + 32 : 5*a + 12 : 1)
+      sage: discrete_log(Q,P,P.order(),operation='+')
+      39
+
+   An example of big smooth group:
+
+      sage: F.<a> = GF(2^63)
+      sage: g = F.gen()
+      sage: u = g**123456789
+      sage: discrete_log(u,g)
+      123456789
+
+   AUTHORS:
+
+   * William Stein and David Joyner (2005-01-05)
+
+   * John Cremona (2008-02-29) rewrite using "dict()" and make generic
+[0;31mInit docstring:[0m Initialize self.  See help(type(self)) for accurate signature.
+[0;31mFile:[0m           /usr/lib/python3/dist-packages/sage/groups/generic.py
+[0;31mType:[0m           function

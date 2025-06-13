@@ -1,0 +1,10 @@
+from pwn import *
+
+ct1 = bytes.fromhex('2b3d212021215b283d441e572b24222c0b70134122195735622b260b412c213e31332344')
+
+ct2 = bytes.fromhex('253723253c3a284127377f23202052271a620b412e10223c643c3e7f2721213233373f44')
+
+
+
+known = b'grodno{'
+print(xor(xor(ct1, ct2), known))

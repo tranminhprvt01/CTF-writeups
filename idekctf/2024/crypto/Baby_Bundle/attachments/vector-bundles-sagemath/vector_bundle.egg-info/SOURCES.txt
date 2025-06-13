@@ -1,0 +1,15 @@
+LICENSE
+README.md
+setup.py
+vector_bundle/__init__.py
+vector_bundle/algebras.py
+vector_bundle/constructions.py
+vector_bundle/ext_group.py
+vector_bundle/function_field_utility.py
+vector_bundle/hom_bundle.py
+vector_bundle/vector_bundle.py
+vector_bundle.egg-info/PKG-INFO
+vector_bundle.egg-info/SOURCES.txt
+vector_bundle.egg-info/dependency_links.txt
+vector_bundle.egg-info/requires.txt
+vector_bundle.egg-info/top_level.txt

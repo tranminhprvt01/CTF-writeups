@@ -1,0 +1,22 @@
+version: '3'
+services:
+  service:
+    build: .
+    restart: always
+    privileged: true
+    ports:
+      - "12345:12345"
+    volumes:
+      - ./flag.txt:/flag.txt:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 16MB
+    networks:
+      - net
+
+networks:
+    net:
+        name: cnsc_frp_containers
+        external: true
