@@ -1,0 +1,9 @@
+/home/tranminhprvt01/Backup/CTF/1337UPCTF/2024/crypto/Conversationalist/conversationalist/app/target/debug/deps/libchacha20poly1305-e0dfc5d8b32788bb.rmeta: /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/lib.rs /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/cipher.rs /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/../README.md
+
+/home/tranminhprvt01/Backup/CTF/1337UPCTF/2024/crypto/Conversationalist/conversationalist/app/target/debug/deps/libchacha20poly1305-e0dfc5d8b32788bb.rlib: /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/lib.rs /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/cipher.rs /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/../README.md
+
+/home/tranminhprvt01/Backup/CTF/1337UPCTF/2024/crypto/Conversationalist/conversationalist/app/target/debug/deps/chacha20poly1305-e0dfc5d8b32788bb.d: /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/lib.rs /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/cipher.rs /home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/../README.md
+
+/home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/lib.rs:
+/home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/cipher.rs:
+/home/tranminhprvt01/.cargo/registry/src/index.crates.io-6f17d22bba15001f/chacha20poly1305-0.10.1/src/../README.md:

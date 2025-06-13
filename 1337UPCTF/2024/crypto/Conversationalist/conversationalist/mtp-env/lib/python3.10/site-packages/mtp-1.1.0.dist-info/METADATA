@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: mtp
+Version: 1.1.0
+Summary: Many-Time Pad Interactive
+Home-page: https://github.com/CameronLonsdale/MTP
+Author: Cameron Lonsdale
+Author-email: cameron.lonsdale@gmail.com
+License: MIT
+License-File: LICENSE
+Requires-Dist: urwid (==2.1.2)
+

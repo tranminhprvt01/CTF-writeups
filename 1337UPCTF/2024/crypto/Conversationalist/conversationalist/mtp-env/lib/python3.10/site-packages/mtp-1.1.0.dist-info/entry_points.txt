@@ -1,0 +1,2 @@
+[console_scripts]
+mtp = cli:main
